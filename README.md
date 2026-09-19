@@ -1,199 +1,184 @@
-# Enhanced Jersey Number Recognition for Sports Video
+# Jersey Number Pipeline PlusPlus
 
-This repository contains code for an enhanced jersey number recognition pipeline for sports video, extending the framework from **[A General Framework for Jersey Number Recognition in Sports](https://openaccess.thecvf.com/content/CVPR2024W/CVsports/papers/Koshkina_A_General_Framework_for_Jersey_Number_Recognition_in_Sports_Video_CVPRW_2024_paper.pdf)** by Maria Koshkina and James H. Elder.
+This repository contains code for a **bag-of-tricks extension to a jersey number recognition pipeline for sports video**, building on **[A General Framework for Jersey Number Recognition in Sports Video](https://openaccess.thecvf.com/content/CVPR2024W/CVsports/papers/Koshkina_A_General_Framework_for_Jersey_Number_Recognition_in_Sports_Video_CVPRW_2024_paper.pdf)** by Maria Koshkina and James H. Elder.
 
-The project keeps the original multi-stage recognition pipeline while adding practical ML engineering improvements across preprocessing, pose estimation, GPU inference, temporal modeling, prediction consolidation, and pipeline integration.
+The original system recognizes jersey numbers at the tracklet level by filtering distractors, classifying legibility, estimating player pose, cropping the torso, running scene-text recognition, and consolidating predictions across frames. Our project keeps that overall structure and modifies several stages to improve robustness, reduce unnecessary computation, and make tracklet-level prediction more reliable.
 
 ![Pipeline](docs/soccer_pipeline.png)
 
-## Overview
-
-The original pipeline follows:
+## Pipeline
 
 ```text
-player tracklets
-    -> re-identification filtering
-    -> legibility classification
-    -> pose estimation
-    -> pose-guided jersey cropping
-    -> scene-text recognition
-    -> tracklet prediction consolidation
+Player Tracklets
+      |
+      v
+Re-ID / Main-Subject Filtering
+      |
+      v
+Legibility Classification
+      |
+      v
+ViTPose Pose Estimation
+      |
+      v
+Pose-Guided Torso Cropping
+      |
+      v
+PARSeq Scene-Text Recognition
+      |
+      v
+Tracklet Prediction Consolidation
+      |
+      v
+Final Jersey Number
 ```
 
-Our course-project work adds a "bag of tricks" around this architecture to improve robustness, efficiency, and experimentability without changing the core research framing.
+## What We Changed
 
-## Key Optimizations
+### Stage 1: More robust main-subject filtering
 
-### Temporal smoothing for pose keypoints
+The first stage uses re-identification features to identify the main player in each tracklet and reject outliers based on their distance from the tracklet centroid. A failure mode we observed was that **background noise could distort feature generation**, making distractor frames appear closer to the centroid than they should.
 
-We added exponential moving-average smoothing across consecutive pose predictions before jersey-region cropping.
+We added **Non-Local Means denoising** before feature extraction. Compared with local smoothing, Non-Local Means was chosen to reduce background noise while better preserving image edges and player structure.
 
 ```python
-alpha = 0.5
-smoothed = alpha * current + (1 - alpha) * previous
+cv2.fastNlMeansDenoisingColored(...)
 ```
 
-This reduces frame-to-frame keypoint jitter in player tracklets and makes downstream pose-guided crops more stable.
+We also experimented with a training-time augmentation that zeros pixels in a consistent noisy pattern so the feature extractor is encouraged to rely less on background information and more on player-specific visual features.
 
-### Mixed-precision ViTPose inference
+### Stage 2: Legibility-classifier augmentation
 
-ViTPose inference now uses CUDA FP16 autocast when a GPU is available:
+The legibility classifier determines which player frames contain a usable jersey region before the more expensive downstream stages.
+
+We enhanced its training data with:
+
+- **RandAugment**, applying randomized rotations, color shifts, and other image transformations to simulate variation in camera position, lighting, weather, occlusion, and noise.
+- **MixUp**, blending pairs of training images and labels to increase data diversity and encourage smoother decision boundaries.
+
+The project presentation reports that these changes improved robustness and training-data diversity while keeping overall accuracy consistent with the heuristic baseline.
+
+### Stage 3: ViTPose inference and temporal stability
+
+The pose stage identifies shoulders and hips so the pipeline can crop the torso region where jersey numbers are expected to appear. The model used is **ViTPose**, trained on MS COCO.
+
+We explored three changes to this stage.
+
+#### Reduced-precision inference
+
+Pose inference was moved from FP32 to **FP16 where CUDA is available** using mixed-precision execution.
 
 ```python
 with torch.autocast("cuda", dtype=torch.float16):
     ...
 ```
 
-The pose stage also selects CUDA dynamically and falls back to CPU when needed, improving portability across execution environments.
+Using fewer bits per value reduces memory pressure and allows more data to be processed concurrently, with the trade-off that reduced precision can slightly affect numerical accuracy.
 
-### Flash Attention experimentation
+#### Temporal smoothing of keypoints
 
-As part of the course project, the ViTPose attention implementation was modified to experiment with a more efficient attention path.
-
-[ViTPose Flash Attention modification](https://github.com/chinmayarvind23/ViTPose/commit/a993f2c6710a99a7f63fae86608e800c02a4837c)
-
-### More permissive pose-guided cropping
-
-The torso/keypoint confidence threshold used for crop generation was lowered from `0.40` to `0.05`, allowing lower-confidence but still useful keypoints to contribute to jersey-region localization.
-
-### Image denoising
-
-We added an OpenCV preprocessing stage using Non-Local Means denoising:
-
-```python
-cv2.fastNlMeansDenoisingColored(...)
-```
-
-The denoising pipeline preserves the original SoccerNet tracklet directory structure so it can be inserted before downstream recognition.
-
-### Robustness-oriented augmentation
-
-A custom augmentation stage masks alternating pixel locations to simulate partial visual degradation while preserving the tracklet structure of the dataset.
-
-This provides an additional robustness stressor for downstream recognition models.
-
-### Learned tracklet prediction consolidation
-
-The original pipeline aggregates frame-level jersey predictions with confidence-based logic.
-
-We added a **bidirectional LSTM consolidator** that learns from the sequence of:
-
-- frame-level jersey-number predictions
-- prediction confidence values
+Keypoint predictions can jitter from frame to frame because of occlusion, motion, and pose variation. We added **exponential temporal smoothing** using the current and previous keypoint predictions:
 
 ```text
-frame predictions + confidences
-            |
-            v
-        embeddings
-            |
-            v
-    bidirectional LSTM
-            |
-            v
-   final tracklet jersey ID
+smoothed_keypoint =
+    alpha * current_keypoint
+    + (1 - alpha) * previous_keypoint
 ```
 
-This reframes final jersey-number selection as a learned sequence-modeling problem rather than relying only on hand-designed aggregation.
+This makes shoulder and hip trajectories more stable before torso cropping.
 
-### Training and pipeline integration improvements
+#### Flash-attention-style pose optimization
 
-Additional engineering changes include:
+We also explored replacing the standard attention computation in the ViTPose transformer with a **FlashAttention-style scaled dot-product attention path**. The motivation was to reduce attention-memory traffic by computing attention in tiled GPU-friendly blocks rather than materializing the full attention matrix.
 
-- updated legibility-classifier optimizer integration
-- safer CUDA/CPU device handling
-- robust pose-keypoint serialization for JSON outputs
-- compatibility fixes for the bundled PARSeq version
-- configurable execution of individual pipeline stages
-- end-to-end pipeline runtime instrumentation
-- environment and execution-path fixes across the multi-model pipeline
+This optimization has an important trade-off: efficient FlashAttention kernels are hardware-sensitive and require low-level implementation details to realize their full speedup.
 
-## ML System Architecture
+### Stage 4: Task-specific PARSeq decoding
+
+The scene-text recognition stage uses **PARSeq (Permuted Autoregressive Sequence Models)** to recognize jersey numbers from torso crops.
+
+PARSeq normally trains and evaluates across multiple permutations of token positions. For jersey numbers, however, the useful reading direction is overwhelmingly **left-to-right and approximately horizontal**.
+
+We therefore investigated restricting decoding to position permutations that correspond to near-horizontal left-to-right reading. This reduces unnecessary permutation work and memory usage for this task, with the acknowledged trade-off that aggressively reducing permutations can slightly reduce recognition accuracy.
+
+A natural extension is to make the allowed reading-angle threshold learnable so the model can choose the amount of permutation flexibility appropriate for the data.
+
+### Stage 5: Learned tracklet prediction consolidation
+
+Individual frames within a player tracklet can disagree because of:
+
+- partial jersey visibility,
+- occlusion,
+- pose variation,
+- low-confidence STR predictions,
+- ambiguity between one- and two-digit jersey numbers.
+
+The baseline consolidation methods use confidence-weighted voting or probabilistic aggregation across frames.
+
+We added a **bidirectional LSTM prediction consolidator** that learns to combine a sequence of frame-level jersey predictions and their confidence scores.
 
 ```text
-Sports Video / Player Tracklets
-            |
-            v
-      Re-ID Features
-            |
-            v
-   Gaussian Outlier Filter
-            |
-            v
-  Legibility Classification
-            |
-            v
-       ViTPose Inference
-   +-----------------------+
-   | temporal smoothing    |
-   | mixed precision       |
-   | attention experiments |
-   +-----------------------+
-            |
-            v
-    Pose-Guided ROI Crops
-            |
-            v
-      PARSeq Scene-Text
-        Recognition
-            |
-            v
- Frame Prediction + Confidence
-            |
-            v
- Bidirectional LSTM Consolidation
-            |
-            v
-      Final Jersey Number
+Frame-level jersey predictions
+        + confidence scores
+                |
+                v
+         Embedding / Features
+                |
+                v
+       Bidirectional LSTM
+                |
+                v
+           Mean Pooling
+                |
+                v
+       Fully Connected Layer
+                |
+                v
+        100-way Prediction
 ```
 
-The project combines computer vision, pose estimation, representation learning, scene-text recognition, temporal modeling, GPU inference optimization, data preprocessing, and end-to-end ML pipeline engineering.
+This makes the final tracklet prediction a learned temporal aggregation problem rather than relying only on a fixed hand-designed rule.
 
-## Pipeline Components
+## System-Level Changes
 
-### Image-level recognition
+In addition to the stage-specific experiments, the code includes several integration changes needed to run the modified multi-model pipeline:
 
-Experiments on the Hockey dataset include:
+- dynamic CPU/GPU device selection for pose inference,
+- FP16 autocast on CUDA,
+- temporal keypoint state across frames,
+- JSON-safe keypoint serialization,
+- configurable pipeline stages,
+- runtime instrumentation for end-to-end execution,
+- compatibility updates for the bundled PARSeq code,
+- integration of the learned consolidation stage into the SoccerNet pipeline.
 
-- legibility classification
-- scene-text recognition for jersey numbers
+## Results
 
-### Tracklet-level recognition
+The project evaluated the complete pipeline on the SoccerNet jersey-number recognition task. The presentation reports a leaderboard result of **87.45 accuracy** for the submitted system.
 
-Experiments on SoccerNet include:
+The project was designed as a collection of complementary modifications rather than a single model replacement, so individual stages have different trade-offs:
 
-- occlusion/outlier removal using re-identification features and Gaussian filtering
-- legibility classification
-- pose-guided ROI cropping
-- scene-text recognition for jersey numbers
-- tracklet prediction consolidation
+- denoising and augmentation target robustness,
+- reduced precision and task-specific decoding target efficiency,
+- temporal smoothing targets pose stability,
+- learned consolidation targets consistency across frames.
 
 ## Requirements
 
 - PyTorch
 - OpenCV
 
-The full pipeline also depends on several external research repositories and model implementations.
+The complete pipeline also relies on the external research implementations listed below.
 
 ## Setup
 
-Clone the repository and create the required environments.
-
-Run:
+Clone the repository and run:
 
 ```bash
 python3 setup.py
 ```
 
-to set up supported dependencies and model components.
-
-Alternatively, configure each dependency manually.
-
-### SAM
-
-Repository:
-
-[https://github.com/davda54/sam](https://github.com/davda54/sam)
+The setup process configures the external components used by the pipeline. They can also be installed manually.
 
 ### Centroid-ReID
 
@@ -201,11 +186,7 @@ Repository:
 
 [https://github.com/mikwieczorek/centroids-reid](https://github.com/mikwieczorek/centroids-reid)
 
-Download the Centroid-ReID model weights:
-
-[centroid-reid model weights](https://drive.google.com/file/d/1bSUNpvMfJkvCFOu-TK-o7iGY1p-9BxmO/view?usp=sharing)
-
-Place them under:
+Download the [Centroid-ReID model weights](https://drive.google.com/file/d/1bSUNpvMfJkvCFOu-TK-o7iGY1p-9BxmO/view?usp=sharing) and place them under:
 
 ```text
 reid/centroids-reid/models
@@ -217,25 +198,17 @@ Repository:
 
 [https://github.com/ViTAE-Transformer/ViTPose](https://github.com/ViTAE-Transformer/ViTPose)
 
-Download the ViTPose model weights:
-
-[ViTPose model weights](https://1drv.ms/u/s!AimBgYV7JjTlgShLMI-kkmvNfF_h?e=dEhGHe)
-
-Place them under:
+Download the [ViTPose model weights](https://1drv.ms/u/s!AimBgYV7JjTlgShLMI-kkmvNfF_h?e=dEhGHe) and place them under:
 
 ```text
 pose/ViTPose/checkpoints/
 ```
 
-The course-project attention modification is available here:
-
-[ViTPose Flash Attention modification](https://github.com/chinmayarvind23/ViTPose/commit/a993f2c6710a99a7f63fae86608e800c02a4837c)
-
 ### PARSeq
 
-This repository includes the PARSeq version used by the jersey-number recognition pipeline.
+The repository contains the PARSeq version used by the jersey-number recognition pipeline.
 
-Original PARSeq repository:
+Original repository:
 
 [https://github.com/baudm/parseq](https://github.com/baudm/parseq)
 
@@ -245,6 +218,12 @@ Model weights:
 - [Hockey fine-tuned](https://drive.google.com/file/d/1FyM31xvSXFRusN0sZH0EWXoHwDfB9WIE/view?usp=sharing)
 - [SoccerNet fine-tuned](https://drive.google.com/file/d/1uRln22tlhneVt3P6MePmVxBWSLMsL3bm/view?usp=sharing)
 
+### SAM
+
+Repository:
+
+[https://github.com/davda54/sam](https://github.com/davda54/sam)
+
 ## Data
 
 ### SoccerNet Jersey Number Recognition
@@ -253,7 +232,7 @@ Dataset:
 
 [https://github.com/SoccerNet/sn-jersey](https://github.com/SoccerNet/sn-jersey)
 
-Download and save under the `data` subfolder.
+Download and save it under the `data` directory.
 
 Additional resources:
 
@@ -262,9 +241,9 @@ Additional resources:
 
 ### Hockey
 
-The Hockey data contains legibility and jersey-number datasets.
+The Hockey data contains the legibility and jersey-number datasets used by the original pipeline.
 
-Request access from the original dataset authors and extract under:
+Request access from the original dataset authors and extract it under:
 
 ```text
 data/Hockey
@@ -277,35 +256,19 @@ data/Hockey
 
 ## Configuration
 
-Update `configuration.py` to set dataset paths, dependency paths, checkpoints, and output directories.
+Update `configuration.py` to configure dataset paths, dependency paths, model checkpoints, and output directories.
 
-Individual pipeline stages can also be enabled or disabled from `main.py` for targeted experiments and profiling.
+Individual pipeline stages can be enabled or disabled in `main.py` for targeted experiments.
 
 ## Inference
 
 ### SoccerNet
 
-Run:
-
 ```bash
 python3 main.py SoccerNet test
 ```
 
-The tracklet pipeline executes:
-
-```text
-ReID
--> outlier filtering
--> legibility classification
--> pose estimation
--> ROI cropping
--> scene-text recognition
--> tracklet consolidation
-```
-
 ### Hockey
-
-Run:
 
 ```bash
 python3 main.py Hockey test
@@ -353,13 +316,20 @@ python3 main.py SoccerNet train --train_str
 
 ## Project Lineage
 
-This repository builds on the following work:
+This project builds on:
 
-1. **A General Framework for Jersey Number Recognition in Sports Video** by Maria Koshkina and James H. Elder
+1. **Koshkina, M. & Elder, J. H. (2024), A General Framework for Jersey Number Recognition in Sports Video**
 2. Original implementation: [mkoshkina/jersey-number-pipeline](https://github.com/mkoshkina/jersey-number-pipeline)
 3. Course-project extension: [MahmoudOsama97/jersey-number-pipeline_PlusPlus](https://github.com/MahmoudOsama97/jersey-number-pipeline_PlusPlus)
 
-The enhancements in this project focus on pose stability, efficient inference, robustness-oriented preprocessing, learned temporal consolidation, and pipeline integration.
+The modifications documented above were developed as a COSC 419/519B project by Chinmay Arvind, Mouhamed Jaber, Atharva Jagtap, Jayden Jayawardhena, and Mahmoud Soliman.
+
+## References
+
+1. Koshkina, M., & Elder, J. H. (2024). **A General Framework for Jersey Number Recognition in Sports Video.** Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition Workshops, 3235-3244.
+2. Xu, Y., Zhang, J., Zhang, Q., & Tao, D. (2022). **ViTPose: Simple Vision Transformer Baselines for Human Pose Estimation.** Advances in Neural Information Processing Systems, 35, 38571-38584.
+3. Dao, T. (2023). **FlashAttention-2: Faster Attention with Better Parallelism and Work Partitioning.** arXiv:2307.08691.
+4. Gordić, A. (2024). **ELI5: Flash Attention.** Medium.
 
 ## Citation
 
