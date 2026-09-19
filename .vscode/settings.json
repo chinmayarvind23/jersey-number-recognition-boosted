@@ -1,0 +1,6 @@
+{
+    "python.analysis.extraPaths": [
+        "./reid/centroids-reid",
+        "./str/parseq"
+    ]
+}
