@@ -1,144 +1,371 @@
-# A General Framework for Jersey Number Recognition in Sports
+# Enhanced Jersey Number Recognition for Sports Video
 
-Code, data, and model weights for paper  [A General Framework for Jersey Number Recognition in Sports](https://openaccess.thecvf.com/content/CVPR2024W/CVsports/papers/Koshkina_A_General_Framework_for_Jersey_Number_Recognition_in_Sports_Video_CVPRW_2024_paper.pdf) (Maria Koshkina, James H. Elder).
+This repository contains code for an enhanced jersey number recognition pipeline for sports video, extending the framework from **[A General Framework for Jersey Number Recognition in Sports](https://openaccess.thecvf.com/content/CVPR2024W/CVsports/papers/Koshkina_A_General_Framework_for_Jersey_Number_Recognition_in_Sports_Video_CVPRW_2024_paper.pdf)** by Maria Koshkina and James H. Elder.
+
+The project keeps the original multi-stage recognition pipeline while adding practical ML engineering improvements across preprocessing, pose estimation, GPU inference, temporal modeling, prediction consolidation, and pipeline integration.
 
 ![Pipeline](docs/soccer_pipeline.png)
 
-Image-level detection, localization and recognition (experiments on Hockey dataset):
+## Overview
 
-- legibility classifier
-- scene text recognition for jersey numbers
+The original pipeline follows:
 
-Tracklet-level detection, localization and recognition (experiments on SoccerNet dataset):
+```text
+player tracklets
+    -> re-identification filtering
+    -> legibility classification
+    -> pose estimation
+    -> pose-guided jersey cropping
+    -> scene-text recognition
+    -> tracklet prediction consolidation
+```
 
-- occlusion/outlier removal using re-id features and fitting a Gaussian
-- legibility classifier
-- pose-guided RoI cropping
-- scene text recognition for jersey numbers
+Our course-project work adds a "bag of tricks" around this architecture to improve robustness, efficiency, and experimentability without changing the core research framing.
+
+## Key Optimizations
+
+### Temporal smoothing for pose keypoints
+
+We added exponential moving-average smoothing across consecutive pose predictions before jersey-region cropping.
+
+```python
+alpha = 0.5
+smoothed = alpha * current + (1 - alpha) * previous
+```
+
+This reduces frame-to-frame keypoint jitter in player tracklets and makes downstream pose-guided crops more stable.
+
+### Mixed-precision ViTPose inference
+
+ViTPose inference now uses CUDA FP16 autocast when a GPU is available:
+
+```python
+with torch.autocast("cuda", dtype=torch.float16):
+    ...
+```
+
+The pose stage also selects CUDA dynamically and falls back to CPU when needed, improving portability across execution environments.
+
+### Flash Attention experimentation
+
+As part of the course project, the ViTPose attention implementation was modified to experiment with a more efficient attention path.
+
+[ViTPose Flash Attention modification](https://github.com/chinmayarvind23/ViTPose/commit/a993f2c6710a99a7f63fae86608e800c02a4837c)
+
+### More permissive pose-guided cropping
+
+The torso/keypoint confidence threshold used for crop generation was lowered from `0.40` to `0.05`, allowing lower-confidence but still useful keypoints to contribute to jersey-region localization.
+
+### Image denoising
+
+We added an OpenCV preprocessing stage using Non-Local Means denoising:
+
+```python
+cv2.fastNlMeansDenoisingColored(...)
+```
+
+The denoising pipeline preserves the original SoccerNet tracklet directory structure so it can be inserted before downstream recognition.
+
+### Robustness-oriented augmentation
+
+A custom augmentation stage masks alternating pixel locations to simulate partial visual degradation while preserving the tracklet structure of the dataset.
+
+This provides an additional robustness stressor for downstream recognition models.
+
+### Learned tracklet prediction consolidation
+
+The original pipeline aggregates frame-level jersey predictions with confidence-based logic.
+
+We added a **bidirectional LSTM consolidator** that learns from the sequence of:
+
+- frame-level jersey-number predictions
+- prediction confidence values
+
+```text
+frame predictions + confidences
+            |
+            v
+        embeddings
+            |
+            v
+    bidirectional LSTM
+            |
+            v
+   final tracklet jersey ID
+```
+
+This reframes final jersey-number selection as a learned sequence-modeling problem rather than relying only on hand-designed aggregation.
+
+### Training and pipeline integration improvements
+
+Additional engineering changes include:
+
+- updated legibility-classifier optimizer integration
+- safer CUDA/CPU device handling
+- robust pose-keypoint serialization for JSON outputs
+- compatibility fixes for the bundled PARSeq version
+- configurable execution of individual pipeline stages
+- end-to-end pipeline runtime instrumentation
+- environment and execution-path fixes across the multi-model pipeline
+
+## ML System Architecture
+
+```text
+Sports Video / Player Tracklets
+            |
+            v
+      Re-ID Features
+            |
+            v
+   Gaussian Outlier Filter
+            |
+            v
+  Legibility Classification
+            |
+            v
+       ViTPose Inference
+   +-----------------------+
+   | temporal smoothing    |
+   | mixed precision       |
+   | attention experiments |
+   +-----------------------+
+            |
+            v
+    Pose-Guided ROI Crops
+            |
+            v
+      PARSeq Scene-Text
+        Recognition
+            |
+            v
+ Frame Prediction + Confidence
+            |
+            v
+ Bidirectional LSTM Consolidation
+            |
+            v
+      Final Jersey Number
+```
+
+The project combines computer vision, pose estimation, representation learning, scene-text recognition, temporal modeling, GPU inference optimization, data preprocessing, and end-to-end ML pipeline engineering.
+
+## Pipeline Components
+
+### Image-level recognition
+
+Experiments on the Hockey dataset include:
+
+- legibility classification
+- scene-text recognition for jersey numbers
+
+### Tracklet-level recognition
+
+Experiments on SoccerNet include:
+
+- occlusion/outlier removal using re-identification features and Gaussian filtering
+- legibility classification
+- pose-guided ROI cropping
+- scene-text recognition for jersey numbers
 - tracklet prediction consolidation
 
-## Requirements:
+## Requirements
 
-* pytorch 1.9.0
-* opencv
+- PyTorch
+- OpenCV
 
-## Setup:
+The full pipeline also depends on several external research repositories and model implementations.
 
-Clone current repo.
-Create conda environment and install requirements.
-Code makes use of the several repositories. Run
+## Setup
 
+Clone the repository and create the required environments.
+
+Run:
+
+```bash
+python3 setup.py
 ```
-python3 setup.py 
+
+to set up supported dependencies and model components.
+
+Alternatively, configure each dependency manually.
+
+### SAM
+
+Repository:
+
+[https://github.com/davda54/sam](https://github.com/davda54/sam)
+
+### Centroid-ReID
+
+Repository:
+
+[https://github.com/mikwieczorek/centroids-reid](https://github.com/mikwieczorek/centroids-reid)
+
+Download the Centroid-ReID model weights:
+
+[centroid-reid model weights](https://drive.google.com/file/d/1bSUNpvMfJkvCFOu-TK-o7iGY1p-9BxmO/view?usp=sharing)
+
+Place them under:
+
+```text
+reid/centroids-reid/models
 ```
 
-to automatically clone, setup a separate conda environment for each and fetch models.
+### ViTPose
 
-Alternatively,  clone each of the following repo, setup conda environments for each following documentation in corresponding repo, and download models:
+Repository:
 
-### SAM:
+[https://github.com/ViTAE-Transformer/ViTPose](https://github.com/ViTAE-Transformer/ViTPose)
 
-Should be in jersey-number-pipeline/sam. Repo: [https://github.com/davda54/sam](https://github.com/davda54/sam)
+Download the ViTPose model weights:
 
-### Centroid-Reid:
+[ViTPose model weights](https://1drv.ms/u/s!AimBgYV7JjTlgShLMI-kkmvNfF_h?e=dEhGHe)
 
-Should be in jersey-number-pipeline/reid/centroids-reid. Repo: [https://github.com/mikwieczorek/centroids-reid](https://github.com/mikwieczorek/centroids-reid).
-Download [centroid-reid model weights](https://drive.google.com/file/d/1bSUNpvMfJkvCFOu-TK-o7iGY1p-9BxmO/view?usp=sharing) and place
-them under jersey-number-pipeline/reid/centroids-reid/models.
+Place them under:
 
-### ViTPose:
+```text
+pose/ViTPose/checkpoints/
+```
 
-Should be in jersey-number-pipeline/pose/ViTPose. Repo: [https://github.com/ViTAE-Transformer/ViTPose](https://github.com/ViTAE-Transformer/ViTPose).
-Download [ViTPose model weights](https://1drv.ms/u/s!AimBgYV7JjTlgShLMI-kkmvNfF_h?e=dEhGHe) and place
-them under jersey-number-pipeline/pose/ViTPose/checkpoints/.
+The course-project attention modification is available here:
 
-### PARSeq:
+[ViTPose Flash Attention modification](https://github.com/chinmayarvind23/ViTPose/commit/a993f2c6710a99a7f63fae86608e800c02a4837c)
 
-We include the version of the PARSeq code that was used to fine-tune the jersey number model as part of this repo. The original PARSeq repo is [https://github.com/baudm/parseq](https://github.com/baudm/parseq). Model weights should be downloaded and placed under jersey-number-pipeline/models/.
+### PARSeq
 
-* [Original model weights](https://drive.google.com/file/d/1AK_GnM6pIYyfIf3tBYSKIyR3Fa3Z46Cx/view?usp=sharing)
-* [Hockey fine-tuned](https://drive.google.com/file/d/1FyM31xvSXFRusN0sZH0EWXoHwDfB9WIE/view?usp=sharing)
-* [SoccerNet fine-tuned](https://drive.google.com/file/d/1uRln22tlhneVt3P6MePmVxBWSLMsL3bm/view?usp=sharing)
+This repository includes the PARSeq version used by the jersey-number recognition pipeline.
 
-## Data:
+Original PARSeq repository:
 
-SoccerNet Jersey Number Recognition:
+[https://github.com/baudm/parseq](https://github.com/baudm/parseq)
+
+Model weights:
+
+- [Original model weights](https://drive.google.com/file/d/1AK_GnM6pIYyfIf3tBYSKIyR3Fa3Z46Cx/view?usp=sharing)
+- [Hockey fine-tuned](https://drive.google.com/file/d/1FyM31xvSXFRusN0sZH0EWXoHwDfB9WIE/view?usp=sharing)
+- [SoccerNet fine-tuned](https://drive.google.com/file/d/1uRln22tlhneVt3P6MePmVxBWSLMsL3bm/view?usp=sharing)
+
+## Data
+
+### SoccerNet Jersey Number Recognition
+
+Dataset:
+
 [https://github.com/SoccerNet/sn-jersey](https://github.com/SoccerNet/sn-jersey)
-Download and save under /data subfolder.
 
-* Weakly-labelled player images used to train legibility classifier can be downloaded [here](https://drive.google.com/file/d/1CmJfUmS_ZudgEiCT14b2CbyMA3nEO_uy/view?usp=sharing).
-* Weakly-labelled jersey number crops used to fine-tune STR in LMDB format can be downloaded [here](https://drive.google.com/file/d/1PX8XDF3nNMZAvcjL6M5hurwX78ePAhSs/view?usp=sharing).
+Download and save under the `data` subfolder.
 
-Hockey (comprised of legibility dataset and jersey number dataset):
+Additional resources:
 
-* Request access by contacting [Maria Koshkina](mailto:koshkina@hotmail.com?subject=Hockey). Extract under data/Hockey subfolder.
+- [Weakly-labelled player images used to train the legibility classifier](https://drive.google.com/file/d/1CmJfUmS_ZudgEiCT14b2CbyMA3nEO_uy/view?usp=sharing)
+- [Weakly-labelled jersey-number crops used to fine-tune STR](https://drive.google.com/file/d/1PX8XDF3nNMZAvcjL6M5hurwX78ePAhSs/view?usp=sharing)
 
-### Trained Legibility Classifier Weights:
+### Hockey
 
-Download and place under jersey-number-pipeline/models/.
+The Hockey data contains legibility and jersey-number datasets.
 
-* [Hockey](https://drive.google.com/file/d/1RfxINtZ_wCNVF8iZsiMYuFOP7KMgqgDp/view?usp=sharing)
-* [SoccerNet](https://drive.google.com/file/d/18HAuZbge3z8TSfRiX_FzsnKgiBs-RRNw/view?usp=sharing)
+Request access from the original dataset authors and extract under:
 
-## Configuration:
-
-Update configuration.py if required to set custom path to data or dependencies.
-
-## Inference:
-
-To run the full inference pipeline for SoccerNet:
-
+```text
+data/Hockey
 ```
+
+### Trained Legibility Classifier Weights
+
+- [Hockey](https://drive.google.com/file/d/1RfxINtZ_wCNVF8iZsiMYuFOP7KMgqgDp/view?usp=sharing)
+- [SoccerNet](https://drive.google.com/file/d/18HAuZbge3z8TSfRiX_FzsnKgiBs-RRNw/view?usp=sharing)
+
+## Configuration
+
+Update `configuration.py` to set dataset paths, dependency paths, checkpoints, and output directories.
+
+Individual pipeline stages can also be enabled or disabled from `main.py` for targeted experiments and profiling.
+
+## Inference
+
+### SoccerNet
+
+Run:
+
+```bash
 python3 main.py SoccerNet test
 ```
 
-To run legibility and jersey number inference for hockey:
+The tracklet pipeline executes:
 
+```text
+ReID
+-> outlier filtering
+-> legibility classification
+-> pose estimation
+-> ROI cropping
+-> scene-text recognition
+-> tracklet consolidation
 ```
+
+### Hockey
+
+Run:
+
+```bash
 python3 main.py Hockey test
 ```
 
-Update actions in main.py actions list to run steps selectively.
+## Training
 
-## Train (Hockey)
+### Hockey legibility classifier
 
-Train legibility classifier:
-
+```bash
+python3 legibility_classifier.py \
+  --train \
+  --arch resnet34 \
+  --sam \
+  --data <new-dataset-directory> \
+  --trained_model_path ./experiments/hockey_legibility.pth
 ```
-python3 legibility_classifier.py --train --arch resnet34 --sam --data <new-dataset-directory> --trained_model_path ./experiments/hockey_legibility.pth
-```
 
-Fine-tune PARSeq STR for hockey number recognition:
+### Hockey PARSeq fine-tuning
 
-```
+```bash
 python3 main.py Hockey train --train_str
 ```
 
-Trained model will be under str/parseq/outputs
+### SoccerNet legibility fine-tuning
 
-## Train (SoccerNet)
+SoccerNet training uses weak labels generated from models trained on Hockey data.
 
-To train legibility classifier and jersey number recognition for SoccerNet, we first generate weakly labelled datasets and then use them to fine-tune.
-Weak labels are obtained by using models trained on hockey data.
-
-Train legibility classifier for it:
-
+```bash
+python3 legibility_classifier.py \
+  --finetune \
+  --arch resnet34 \
+  --sam \
+  --data <new-dataset-directory> \
+  --full_val_dir <new-dataset-directory>/val \
+  --trained_model_path ./experiments/hockey_legibility.pth \
+  --new_trained_model_path ./experiments/sn_legibility.pth
 ```
-python3 legibility_classifier.py --finetune --arch resnet34 --sam --data <new-dataset-directory>  --full_val_dir
-<new-dataset-directory>/val --trained_model_path ./experiments/hockey_legibility.pth --new_trained_model_path ./experiments/sn_legibility.pth
-```
 
-Fine-tune PARSeq on weakly-labelled SoccerNet data:
+### SoccerNet PARSeq fine-tuning
 
-```
+```bash
 python3 main.py SoccerNet train --train_str
 ```
 
-Trained model will be under str/parseq/outputs.
+## Project Lineage
+
+This repository builds on the following work:
+
+1. **A General Framework for Jersey Number Recognition in Sports Video** by Maria Koshkina and James H. Elder
+2. Original implementation: [mkoshkina/jersey-number-pipeline](https://github.com/mkoshkina/jersey-number-pipeline)
+3. Course-project extension: [MahmoudOsama97/jersey-number-pipeline_PlusPlus](https://github.com/MahmoudOsama97/jersey-number-pipeline_PlusPlus)
+
+The enhancements in this project focus on pose stability, efficient inference, robustness-oriented preprocessing, learned temporal consolidation, and pipeline integration.
 
 ## Citation
 
-```
+If you use the underlying jersey-number recognition framework, please cite the original work:
+
+```bibtex
 @InProceedings{Koshkina_2024_CVPR,
     author    = {Koshkina, Maria and Elder, James H.},
     title     = {A General Framework for Jersey Number Recognition in Sports Video},
@@ -151,14 +378,14 @@ Trained model will be under str/parseq/outputs.
 
 ## Acknowledgements
 
-We would like to thank authors of the following repositories:
+We would like to thank the authors of the following repositories:
 
-* [PARSeq](https://github.com/baudm/parseq)
-* [Centroid-Reid](https://github.com/mikwieczorek/centroids-reid)
-* [ViTPose](https://github.com/ViTAE-Transformer/ViTPose)
-* [SoccerNet](https://github.com/SoccerNet/sn-jersey)
-* [McGill Hockey Player Tracking Dataset](https://github.com/grant81/hockeyTrackingDataset)
-* [SAM](https://github.com/davda54/sam)
+- [PARSeq](https://github.com/baudm/parseq)
+- [Centroid-ReID](https://github.com/mikwieczorek/centroids-reid)
+- [ViTPose](https://github.com/ViTAE-Transformer/ViTPose)
+- [SoccerNet](https://github.com/SoccerNet/sn-jersey)
+- [McGill Hockey Player Tracking Dataset](https://github.com/grant81/hockeyTrackingDataset)
+- [SAM](https://github.com/davda54/sam)
 
 ## License
 
