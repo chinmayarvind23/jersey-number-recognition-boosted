@@ -4,8 +4,6 @@ Code, data, and model weights for paper  [A General Framework for Jersey Number 
 
 ![Pipeline](docs/soccer_pipeline.png)
 
-Modifcation to attention mechanism for COSC 419/519B course project can be found here (Flash attention): https://github.com/chinmayarvind23/ViTPose/commit/a993f2c6710a99a7f63fae86608e800c02a4837c
-
 Image-level detection, localization and recognition (experiments on Hockey dataset):
 
 - legibility classifier
