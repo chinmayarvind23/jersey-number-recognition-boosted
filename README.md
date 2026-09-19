@@ -33,7 +33,7 @@ Tracklet Prediction Consolidation
 Final Jersey Number
 ```
 
-## What We Changed
+## What We Optimized
 
 ### Stage 1: More robust main-subject filtering
 
@@ -56,13 +56,13 @@ We enhanced its training data with:
 - **RandAugment**, applying randomized rotations, color shifts, and other image transformations to simulate variation in camera position, lighting, weather, occlusion, and noise.
 - **MixUp**, blending pairs of training images and labels to increase data diversity and encourage smoother decision boundaries.
 
-The project presentation reports that these changes improved robustness and training-data diversity while keeping overall accuracy consistent with the heuristic baseline.
+The project presentation reports that these optimizations improved robustness and training-data diversity while keeping overall accuracy consistent with the heuristic baseline.
 
 ### Stage 3: ViTPose inference and temporal stability
 
 The pose stage identifies shoulders and hips so the pipeline can crop the torso region where jersey numbers are expected to appear. The model used is **ViTPose**, trained on MS COCO.
 
-We explored three changes to this stage.
+We explored three optimizations for this stage.
 
 #### Reduced-precision inference
 
@@ -139,9 +139,9 @@ Frame-level jersey predictions
 
 This makes the final tracklet prediction a learned temporal aggregation problem rather than relying only on a fixed hand-designed rule.
 
-## System-Level Changes
+## System-Level Optimizations
 
-In addition to the stage-specific experiments, the code includes several integration changes needed to run the modified multi-model pipeline:
+In addition to the stage-specific experiments, the code includes several integration optimizations needed to run the modified multi-model pipeline:
 
 - dynamic CPU/GPU device selection for pose inference,
 - FP16 autocast on CUDA,
